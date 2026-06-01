@@ -926,7 +926,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       if (frameIdx >= activeData.frames.length - 1) { playing = false; play.textContent = 'Run'; return; }
       frameIdx += 1;
       update(activeData.frames[frameIdx]);
-    }, Math.max(50, 1000 / meta.fps));
+    }, Math.max(50, 1000 / ((meta && meta.fps) || 10)));
 
     (async function init() {
       meta = await fetchJson('data/meta.json');
