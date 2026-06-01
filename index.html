@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fleet Trajectory</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="vendor/leaflet.css">
   <style>
     html, body { margin: 0; height: 100%; font-family: Arial, sans-serif; }
     #map { width: 100%; height: 100%; background: #eef2f4; }
@@ -48,7 +48,7 @@
     <div class="legend" id="legend"></div>
   </div>
   <div class="controls"><div class="controls-inner"><button id="play">Pause</button><input id="slider" type="range" min="0" max="0" value="0"><span id="frameLabel">1 / 1</span></div></div>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="vendor/leaflet.js"></script>
   <script>
     let meta, activeData, activeAlgorithm, activeFleetSize, selectedVehicle = 'all';
     let frameIdx = 0, playing = true, map;
