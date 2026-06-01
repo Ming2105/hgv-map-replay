@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fleet Trajectory</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body { margin: 0; height: 100%; font-family: Arial, sans-serif; }
+    #map { width: 100%; height: 100%; background: #eef2f4; }
+    .panel { position: absolute; z-index: 1000; top: 16px; right: 16px; width: 330px; background: rgba(255,255,255,0.95); border: 1px solid #d0d0d0; border-radius: 8px; padding: 12px 14px; box-shadow: 0 2px 12px rgba(0,0,0,0.18); }
+    .panel h1 { font-size: 16px; margin: 0 0 8px; }
+    .row { display: flex; justify-content: space-between; font-size: 13px; margin: 5px 0; }
+    .selector { display: grid; grid-template-columns: 88px 1fr; gap: 8px; align-items: center; margin: 8px 0 10px; font-size: 13px; }
+    select { width: 100%; padding: 5px 6px; border: 1px solid #aaa; border-radius: 5px; background: #fff; }
+    .vehicle-detail { margin-top: 9px; padding-top: 8px; border-top: 1px solid #ddd; font-size: 13px; line-height: 1.35; }
+    .vehicle-detail strong { display: inline-block; min-width: 76px; color: #444; }
+    .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 8px; margin-top: 9px; font-size: 12px; }
+    .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; border: 1px solid #333; }
+    .controls { position: absolute; z-index: 1000; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(820px, calc(100% - 36px)); background: rgba(255,255,255,0.95); border: 1px solid #d0d0d0; border-radius: 8px; padding: 10px 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.18); }
+    .controls-inner { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
+    button { border: 1px solid #333; background: #fff; border-radius: 5px; padding: 6px 12px; cursor: pointer; font-weight: 700; }
+    input[type=range] { width: 100%; }
+    .vehicle-icon { width: 26px; height: 26px; border-radius: 50%; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; border: 2px solid #202020; box-shadow: 0 1px 6px rgba(0,0,0,0.42); }
+    .vehicle-icon.low { outline: 3px solid #d64545; }
+    .vehicle-icon.rest-credit { box-shadow: 0 0 0 4px rgba(0,194,255,0.42), 0 0 14px 6px rgba(0,194,255,0.72), 0 1px 6px rgba(0,0,0,0.42); }
+    .station-icon { border-radius: 50%; background: #111; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; border: 2px solid #fff; box-shadow: 0 1px 5px rgba(0,0,0,0.35); }
+    .leaflet-tooltip { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel">
+    <h1>Fleet Trajectory</h1>
+    <div class="selector"><label for="algorithmSelect">Algorithm</label><select id="algorithmSelect"></select></div>
+    <div class="selector"><label for="fleetSelect">Fleet</label><select id="fleetSelect"></select></div>
+    <div class="selector"><label for="vehicleSelect">Display</label><select id="vehicleSelect"><option value="all">All vehicles</option></select></div>
+    <div class="row"><span>Time</span><strong id="time">0.00 h</strong></div>
+    <div class="row"><span>Finished</span><strong id="finished">0/20</strong></div>
+    <div class="row"><span>Average SOC</span><strong id="avgSoc">0%</strong></div>
+    <div class="row"><span>Lowest SOC</span><strong id="minSoc">0%</strong></div>
+    <div class="row"><span>Driving</span><strong id="driving">0</strong></div>
+    <div class="row"><span>Queueing</span><strong id="queueing">0</strong></div>
+    <div class="row"><span>Charging only</span><strong id="charging">0</strong></div>
+    <div class="row"><span>Stopped</span><strong id="stopped">0</strong></div>
+    <div class="row"><span>Rest credit</span><strong id="restCredit">0</strong></div>
+    <div class="vehicle-detail" id="vehicleDetail"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="controls"><div class="controls-inner"><button id="play">Pause</button><input id="slider" type="range" min="0" max="0" value="0"><span id="frameLabel">1 / 1</span></div></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let meta, activeData, activeAlgorithm, activeFleetSize, selectedVehicle = 'all';
+    let frameIdx = 0, playing = true, map;
+    const cache = new Map();
+    const vehicleMarkers = new Map();
+    const algorithmSelect = document.getElementById('algorithmSelect');
+    const fleetSelect = document.getElementById('fleetSelect');
+    const vehicleSelect = document.getElementById('vehicleSelect');
+    const slider = document.getElementById('slider');
+    const play = document.getElementById('play');
+    const frameLabel = document.getElementById('frameLabel');
+
+    async function fetchJson(path) {
+      const response = await fetch(path);
+      if (!response.ok) throw new Error(`Failed to load ${path}: ${response.status}`);
+      return response.json();
+    }
+
+    async function loadDataset(algorithm, fleetSize) {
+      const key = `${algorithm}_${fleetSize}`;
+      if (!cache.has(key)) {
+        cache.set(key, fetchJson(meta.datasets[algorithm][fleetSize]));
+      }
+      activeData = await cache.get(key);
+    }
+
+    function initMap() {
+      const mid = meta.route[Math.floor(meta.route.length / 2)];
+      map = L.map('map', { preferCanvas: true }).setView(mid, 6);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+      const route = L.polyline(meta.route, { color: '#1f5fbf', weight: 5, opacity: 0.78 }).addTo(map);
+      map.fitBounds(route.getBounds(), { padding: [42, 42] });
+      for (const station of meta.stations) {
+        const size = Math.max(18, Math.min(44, 14 + station.fast * 2.2 + station.slow * 0.8));
+        const icon = L.divIcon({ className: '', html: `<div class="station-icon" style="width:${size}px;height:${size}px;">${station.fast}</div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+        L.marker([station.lat, station.lon], { icon }).bindPopup(`<strong>${station.name}</strong><br>${station.km} km from Folkstone<br>350 kW: ${station.fast}<br>22 kW: ${station.slow}`).addTo(map);
+      }
+    }
+
+    function initLegend() {
+      const legend = document.getElementById('legend');
+      for (const [name, color] of Object.entries(meta.colors)) {
+        if (name === 'idle') continue;
+        const item = document.createElement('div');
+        item.innerHTML = `<span class="swatch" style="background:${color}"></span>${meta.labels[name] || name.replace('_', ' ')}`;
+        legend.appendChild(item);
+      }
+      const restGlowLegend = document.createElement('div');
+      restGlowLegend.innerHTML = `<span class="swatch" style="background:#00C2FF; box-shadow:0 0 8px #00C2FF;"></span>Rest credit glow`;
+      legend.appendChild(restGlowLegend);
+    }
+
+    function populateAlgorithmSelect() {
+      algorithmSelect.innerHTML = '';
+      for (const algorithm of Object.keys(meta.datasets)) {
+        const option = document.createElement('option');
+        option.value = algorithm;
+        option.textContent = meta.algorithmLabels[algorithm] || algorithm;
+        if (algorithm === activeAlgorithm) option.selected = true;
+        algorithmSelect.appendChild(option);
+      }
+    }
+
+    function populateFleetSelect() {
+      fleetSelect.innerHTML = '';
+      const fleets = meta.datasets[activeAlgorithm];
+      const fleetSizes = Object.keys(fleets).sort((a, b) => Number(a) - Number(b));
+      if (!fleets[activeFleetSize]) activeFleetSize = fleetSizes[0];
+      for (const fleetSize of fleetSizes) {
+        const option = document.createElement('option');
+        option.value = fleetSize;
+        option.textContent = `${fleetSize} vehicles`;
+        if (fleetSize === activeFleetSize) option.selected = true;
+        fleetSelect.appendChild(option);
+      }
+    }
+
+    function populateVehicleSelect() {
+      vehicleSelect.innerHTML = '<option value="all">All vehicles</option>';
+      for (let i = 1; i <= activeData.vehicleCount; i++) {
+        const option = document.createElement('option');
+        option.value = String(i);
+        option.textContent = `Vehicle ${i}`;
+        vehicleSelect.appendChild(option);
+      }
+      selectedVehicle = 'all';
+    }
+
+    function vehicleIcon(vehicle) {
+      const color = meta.colors[vehicle.status] || meta.colors.idle;
+      const low = vehicle.soc < 0.25 ? ' low' : '';
+      const restCredit = vehicle.rest_covering ? ' rest-credit' : '';
+      return L.divIcon({ className: '', html: `<div class="vehicle-icon${low}${restCredit}" style="background:${color}">${vehicle.vehicle_id}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] });
+    }
+
+    function resetVehicleMarkers() {
+      for (const marker of vehicleMarkers.values()) marker.remove();
+      vehicleMarkers.clear();
+      for (const vehicle of activeData.frames[0].vehicles) {
+        const marker = L.marker([vehicle.display_lat, vehicle.display_lon], { icon: vehicleIcon(vehicle), zIndexOffset: 1000 }).addTo(map);
+        marker.bindTooltip('', { sticky: true });
+        vehicleMarkers.set(vehicle.vehicle_id, marker);
+      }
+    }
+
+    function resetTimeline() {
+      frameIdx = 0;
+      slider.max = activeData.frames.length - 1;
+      slider.value = 0;
+      playing = true;
+      play.textContent = 'Pause';
+    }
+
+    function visibleVehicles(frame) {
+      if (selectedVehicle === 'all') return frame.vehicles;
+      return frame.vehicles.filter(v => String(v.vehicle_id) === selectedVehicle);
+    }
+
+    function updateVehicleDetail(frame) {
+      const detail = document.getElementById('vehicleDetail');
+      if (selectedVehicle === 'all') {
+        const maxContinuous = Math.max(...frame.vehicles.map(v => v.continuous_driving_h || 0));
+        const maxDaily = Math.max(...frame.vehicles.map(v => v.daily_driving_h || 0));
+        const totalShort = frame.vehicles.reduce((sum, v) => sum + (v.short_rests || 0), 0);
+        const totalLong = frame.vehicles.reduce((sum, v) => sum + (v.long_rests || 0), 0);
+        detail.innerHTML = `<div><strong>Vehicle</strong><span>All vehicles</span></div><div><strong>Behavior</strong><span>Fleet overview</span></div><div><strong>SOC</strong><span>Average ${(frame.avg_soc * 100).toFixed(1)}%</span></div><div><strong>Distance</strong><span>-</span></div><div><strong>Rest credit</strong><span>${frame.vehicles.filter(v => v.rest_covering).length} vehicles</span></div><div><strong>Cont. drive</strong><span>Max ${maxContinuous.toFixed(2)} h / 4.50 h</span></div><div><strong>Daily drive</strong><span>Max ${maxDaily.toFixed(2)} h / 9.00 h</span></div><div><strong>Short rests</strong><span>${totalShort}</span></div><div><strong>Long rests</strong><span>${totalLong}</span></div>`;
+        return;
+      }
+      const vehicle = frame.vehicles.find(v => String(v.vehicle_id) === selectedVehicle);
+      if (!vehicle) return;
+      const legalText = vehicle.continuous_ok && vehicle.daily_ok ? 'OK' : 'Limit exceeded';
+      detail.innerHTML = `<div><strong>Vehicle</strong><span>V${vehicle.vehicle_id}</span></div><div><strong>Behavior</strong><span>${vehicle.status_label}</span></div><div><strong>Action</strong><span>${vehicle.planned_action || '-'}</span></div><div><strong>SOC</strong><span>${(vehicle.soc * 100).toFixed(1)}%</span></div><div><strong>Distance</strong><span>${vehicle.km.toFixed(1)} km</span></div><div><strong>Rest plan</strong><span>${vehicle.rest_type || 'none'}</span></div><div><strong>Rest credit</strong><span>${vehicle.rest_credit_h.toFixed(2)} / ${vehicle.rest_required_h.toFixed(2)} h</span></div><div><strong>Cont. drive</strong><span>${vehicle.continuous_driving_h.toFixed(2)} h / 4.50 h</span></div><div><strong>Daily drive</strong><span>${vehicle.daily_driving_h.toFixed(2)} h / 9.00 h</span></div><div><strong>Short rests</strong><span>${vehicle.short_rests}</span></div><div><strong>Long rests</strong><span>${vehicle.long_rests}</span></div><div><strong>Check</strong><span>${legalText}</span></div>`;
+    }
+
+    function update(frame) {
+      const shown = visibleVehicles(frame);
+      document.getElementById('time').textContent = `${frame.time_h.toFixed(2)} h`;
+      document.getElementById('finished').textContent = `${frame.arrived}/${activeData.vehicleCount}`;
+      document.getElementById('avgSoc').textContent = `${(frame.avg_soc * 100).toFixed(1)}%`;
+      document.getElementById('minSoc').textContent = `${(frame.min_soc * 100).toFixed(1)}%`;
+      document.getElementById('driving').textContent = frame.counts.driving || 0;
+      document.getElementById('queueing').textContent = frame.counts.queueing || 0;
+      document.getElementById('charging').textContent = (frame.counts.charging_fast || 0) + (frame.counts.charging_slow || 0);
+      document.getElementById('stopped').textContent = frame.counts.stopped || 0;
+      document.getElementById('restCredit').textContent = frame.vehicles.filter(v => v.rest_covering).length;
+      const visibleIds = new Set(shown.map(v => v.vehicle_id));
+      for (const [vehicleId, marker] of vehicleMarkers.entries()) visibleIds.has(vehicleId) ? marker.addTo(map) : marker.remove();
+      for (const vehicle of frame.vehicles) {
+        const marker = vehicleMarkers.get(vehicle.vehicle_id);
+        marker.setLatLng([vehicle.display_lat, vehicle.display_lon]);
+        marker.setIcon(vehicleIcon(vehicle));
+        marker.setTooltipContent(`V${vehicle.vehicle_id} | ${vehicle.status_label} | ${vehicle.planned_action || '-'} | Rest ${vehicle.rest_credit_h.toFixed(2)}/${vehicle.rest_required_h.toFixed(2)} h | SOC ${(vehicle.soc * 100).toFixed(0)}% | ${vehicle.km.toFixed(1)} km`);
+      }
+      slider.value = frame.idx;
+      frameLabel.textContent = `${frame.idx + 1} / ${activeData.frames.length}`;
+      updateVehicleDetail(frame);
+    }
+
+    async function switchDataset() {
+      await loadDataset(activeAlgorithm, activeFleetSize);
+      populateVehicleSelect();
+      resetVehicleMarkers();
+      resetTimeline();
+      update(activeData.frames[0]);
+    }
+
+    play.addEventListener('click', () => {
+      if (playing) { playing = false; play.textContent = 'Run'; return; }
+      if (frameIdx >= activeData.frames.length - 1) { frameIdx = 0; update(activeData.frames[frameIdx]); }
+      playing = true;
+      play.textContent = 'Pause';
+    });
+    slider.addEventListener('input', () => { frameIdx = Number(slider.value); update(activeData.frames[frameIdx]); });
+    algorithmSelect.addEventListener('change', async () => { activeAlgorithm = algorithmSelect.value; populateFleetSelect(); await switchDataset(); });
+    fleetSelect.addEventListener('change', async () => { activeFleetSize = fleetSelect.value; await switchDataset(); });
+    vehicleSelect.addEventListener('change', () => { selectedVehicle = vehicleSelect.value; update(activeData.frames[frameIdx]); });
+    setInterval(() => {
+      if (!playing || !activeData) return;
+      if (frameIdx >= activeData.frames.length - 1) { playing = false; play.textContent = 'Run'; return; }
+      frameIdx += 1;
+      update(activeData.frames[frameIdx]);
+    }, Math.max(50, 1000 / meta.fps));
+
+    (async function init() {
+      meta = await fetchJson('data/meta.json');
+      activeAlgorithm = meta.defaultAlgorithm;
+      activeFleetSize = meta.defaultFleetSize;
+      initMap();
+      initLegend();
+      populateAlgorithmSelect();
+      populateFleetSelect();
+      await switchDataset();
+    })().catch(error => {
+      document.body.innerHTML = `<pre style="padding:24px;white-space:pre-wrap;">${error.stack || error}</pre>`;
+    });
+  </script>
+</body>
+</html>
